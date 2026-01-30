@@ -36,10 +36,10 @@ GP_WORKFORCE_URL = (
     "general-and-personal-medical-services/31-december-2025"
 )
 
-# ODS GP practice data (epraccur replacement) – provides practice postcodes.
-# This is the DSE predefined report that replaced the legacy epraccur.csv.
+# ODS GP practice data – provides practice postcodes.
+# This is the ODS Data Search and Export API endpoint for epraccur.
 EPRACCUR_URL = (
-    "https://files.digital.nhs.uk/assets/ods/current/epraccur.zip"
+    "https://www.odsdatasearchandexport.nhs.uk/api/getReport?report=epraccur"
 )
 
 # ONS mid-year population estimates – England & Wales by local authority.
@@ -190,21 +190,32 @@ def load_gp_workforce(publication_url: str | None = None) -> pd.DataFrame:
 def load_practice_postcodes() -> pd.DataFrame:
     """Download and parse the epraccur dataset to get practice postcodes."""
     ensure_data_dir()
-    zip_path = DATA_DIR / "epraccur.zip"
-    download_file(EPRACCUR_URL, zip_path, "epraccur (practice postcodes)")
+    download_path = DATA_DIR / "epraccur.zip"
+    download_file(EPRACCUR_URL, download_path, "epraccur (practice postcodes)")
 
-    print("  Extracting epraccur data ...")
-    with zipfile.ZipFile(zip_path) as zf:
-        csv_names = zf.namelist()
-        csv_name = [n for n in csv_names if "epraccur" in n.lower()][0]
-        with zf.open(csv_name) as f:
-            df = pd.read_csv(
-                f,
-                header=None,
-                names=EPRACCUR_COLUMNS,
-                encoding="utf-8-sig",
-                low_memory=False,
-            )
+    print("  Reading epraccur data ...")
+    # The file may be a ZIP or a raw CSV depending on the endpoint
+    try:
+        with zipfile.ZipFile(download_path) as zf:
+            csv_names = zf.namelist()
+            csv_name = [n for n in csv_names if "epraccur" in n.lower()][0]
+            with zf.open(csv_name) as f:
+                df = pd.read_csv(
+                    f,
+                    header=None,
+                    names=EPRACCUR_COLUMNS,
+                    encoding="utf-8-sig",
+                    low_memory=False,
+                )
+    except zipfile.BadZipFile:
+        # Not a ZIP — treat as raw CSV
+        df = pd.read_csv(
+            download_path,
+            header=None,
+            names=EPRACCUR_COLUMNS,
+            encoding="utf-8-sig",
+            low_memory=False,
+        )
 
     # Keep only open practices (Status Code 'A' = Active)
     df = df[df["Status Code"].isin(["A", "a"])].copy()
