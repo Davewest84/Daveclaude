@@ -163,17 +163,21 @@ def load_gp_workforce(publication_url: str | None = None) -> pd.DataFrame:
         csv_url = find_practice_csv_url(publication_url)
         download_file(csv_url, zip_path, "GP workforce practice-level ZIP")
 
-    # Extract the CSV from the ZIP
-    print("  Extracting GP workforce data ...")
-    with zipfile.ZipFile(zip_path) as zf:
-        csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
-        if not csv_names:
-            raise RuntimeError(f"No CSV found inside {zip_path}")
-        # Pick the first CSV (there is usually just one)
-        csv_name = csv_names[0]
-        print(f"  Reading {csv_name} ...")
-        with zf.open(csv_name) as f:
-            df = pd.read_csv(f, encoding="utf-8-sig", low_memory=False)
+    # Extract the CSV from the ZIP (or read directly if not zipped)
+    print("  Reading GP workforce data ...")
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            csv_names = [n for n in zf.namelist() if n.lower().endswith(".csv")]
+            if not csv_names:
+                raise RuntimeError(f"No CSV found inside {zip_path}")
+            csv_name = csv_names[0]
+            print(f"  Reading {csv_name} ...")
+            with zf.open(csv_name) as f:
+                df = pd.read_csv(f, encoding="utf-8-sig", low_memory=False)
+    except zipfile.BadZipFile:
+        # Not a ZIP — treat as raw CSV
+        print("  File is not a ZIP — reading as CSV directly ...")
+        df = pd.read_csv(zip_path, encoding="utf-8-sig", low_memory=False)
 
     # Normalise column names to uppercase with underscores
     df.columns = [c.strip().upper().replace(" ", "_") for c in df.columns]
@@ -264,27 +268,32 @@ def load_nspl() -> pd.DataFrame:
         # Extract the main data CSV from the ZIP
         zip_path = nspl_zips[0]
         print(f"  Extracting NSPL from {zip_path.name} ...")
-        with zipfile.ZipFile(zip_path) as zf:
-            # The main CSV is usually in Data/NSPL_*.csv
-            data_csvs = [
-                n for n in zf.namelist()
-                if re.search(r"Data/NSPL.*\.csv$", n, re.IGNORECASE)
-            ]
-            if not data_csvs:
-                # Fallback: any CSV containing 'NSPL' in name
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                # The main CSV is usually in Data/NSPL_*.csv
                 data_csvs = [
                     n for n in zf.namelist()
-                    if "nspl" in n.lower() and n.lower().endswith(".csv")
+                    if re.search(r"Data/NSPL.*\.csv$", n, re.IGNORECASE)
                 ]
-            if not data_csvs:
-                raise RuntimeError(
-                    f"Could not find NSPL data CSV inside {zip_path}. "
-                    "Please extract the main data CSV into data/ manually."
-                )
-            csv_name = data_csvs[0]
-            print(f"  Extracting {csv_name} ...")
-            zf.extract(csv_name, DATA_DIR)
-            nspl_csvs = [DATA_DIR / csv_name]
+                if not data_csvs:
+                    # Fallback: any CSV containing 'NSPL' in name
+                    data_csvs = [
+                        n for n in zf.namelist()
+                        if "nspl" in n.lower() and n.lower().endswith(".csv")
+                    ]
+                if not data_csvs:
+                    raise RuntimeError(
+                        f"Could not find NSPL data CSV inside {zip_path}. "
+                        "Please extract the main data CSV into data/ manually."
+                    )
+                csv_name = data_csvs[0]
+                print(f"  Extracting {csv_name} ...")
+                zf.extract(csv_name, DATA_DIR)
+                nspl_csvs = [DATA_DIR / csv_name]
+        except zipfile.BadZipFile:
+            # Not a ZIP — the file itself is a CSV
+            print("  File is not a ZIP — treating as CSV directly ...")
+            nspl_csvs = [zip_path]
 
     nspl_path = nspl_csvs[0]
     print(f"  Reading NSPL from {nspl_path} ...")
