@@ -51,6 +51,13 @@ POPULATION_URL = (
     "mid2024/ukpopulationestimates18382024.xlsx"
 )
 
+# ONS National Statistics Postcode Lookup (NSPL) – postcode to LA mapping.
+# This is the ArcGIS direct-download URL for the May 2025 NSPL ZIP (~178 MB).
+NSPL_URL = (
+    "https://www.arcgis.com/sharing/rest/content/items/"
+    "077631e063eb4e1ab43575d01381ec33/data"
+)
+
 # Column names in the epraccur data (fixed-width / CSV without headers).
 # See: https://digital.nhs.uk/services/organisation-data-service/
 #      data-search-and-export/csv-downloads/gp-and-gp-practice-related-data
@@ -220,8 +227,8 @@ def load_practice_postcodes() -> pd.DataFrame:
 def load_nspl() -> pd.DataFrame:
     """Load the ONS NSPL postcode-to-LA lookup.
 
-    The full NSPL is ~178 MB zipped. The script looks for it in data/ or
-    prompts the user to download it manually.
+    Downloads the NSPL ZIP (~178 MB) automatically from the ONS Open
+    Geography Portal if not already cached locally.
 
     Expected location: data/NSPL*.csv  (the main data CSV inside the ZIP)
     """
@@ -230,18 +237,18 @@ def load_nspl() -> pd.DataFrame:
     # Check for pre-extracted CSV
     nspl_csvs = list(DATA_DIR.glob("NSPL*.csv"))
     if not nspl_csvs:
+        # Also check inside subdirectories (ZIP extraction may nest)
+        nspl_csvs = list(DATA_DIR.rglob("NSPL*.csv"))
+
+    if not nspl_csvs:
         # Check for the ZIP file
         nspl_zips = list(DATA_DIR.glob("NSPL*.zip"))
         if not nspl_zips:
-            print(
-                "\n  *** NSPL data not found ***\n"
-                "  Please download the National Statistics Postcode Lookup from:\n"
-                "  https://geoportal.statistics.gov.uk/search?q=NSPL\n"
-                "  or: https://www.data.gov.uk/dataset/70fdfc6f-8277-43df-a7d8-874556cb0613/"
-                "national-statistics-postcode-lookup-november-2025-for-the-uk-v2\n\n"
-                "  Save the ZIP file into the data/ directory.\n"
-            )
-            sys.exit(1)
+            # Download automatically from ONS Open Geography Portal
+            zip_path = DATA_DIR / "NSPL.zip"
+            print("  NSPL not found locally — downloading from ONS (~178 MB) ...")
+            download_file(NSPL_URL, zip_path, "NSPL postcode lookup ZIP")
+            nspl_zips = [zip_path]
 
         # Extract the main data CSV from the ZIP
         zip_path = nspl_zips[0]
