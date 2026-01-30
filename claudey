@@ -1,0 +1,40 @@
+claude
+```
+
+### 2. **Create Configuration Files**
+
+**CLAUDE.md** - Place this in your repository root to provide project context:
+- Document your coding standards
+- Add architectural guidelines  
+- Include common commands and workflows
+- Claude reads this to align its contributions with your team's practices
+
+**.claude/commands/** - Create custom slash commands for repeated workflows:
+- Add markdown files with prompt templates
+- Use `$ARGUMENTS` for parameters
+- Example: `.claude/commands/fix-github-issue.md`
+
+**.mcp.json** - Configure Model Context Protocol servers for extended functionality
+
+### 3. **Set Up GitHub Actions Integration (Optional)**
+
+For automated workflows triggered by GitHub events, you can set up the GitHub Action:
+
+1. Run from terminal: `/install-github-app` in Claude Code
+2. Add your `ANTHROPIC_API_KEY` to repository secrets
+3. Copy workflow file to `.github/workflows/claude.yml`
+
+This enables you to mention `@claude` in issues and pull requests to trigger automated coding tasks.
+
+### 4. **Repository Structure Recommendations**
+```
+your-repo/
+├── CLAUDE.md                    # Project context
+├── .claude/
+│   ├── commands/               # Custom slash commands
+│   └── settings.local.json     # Personal settings (gitignored)
+├── .mcp.json                   # MCP server config
+├── .worktreeinclude           # Files to copy to worktrees
+└── .github/
+    └── workflows/
+        └── claude.yml          # GitHub Actions integration
