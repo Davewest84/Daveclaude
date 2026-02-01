@@ -3,17 +3,15 @@ GP Workforce by Local Authority
 
 Calculates the number of GPs working in each local authority area by:
 1. Downloading practice-level GP workforce data from NHS Digital
-2. Mapping GP practices to local authorities using ONS postcode lookups
+2. Mapping GP practices to local authorities using GP providers.xlsx
 3. Matching with ONS mid-year population estimates
 
 Data sources:
 - NHS Digital General Practice Workforce (practice-level CSV)
-- ONS National Statistics Postcode Lookup (NSPL)
+- CQC GP Providers register (GP providers.xlsx) for practice-to-LA mapping
 - ONS Mid-Year Population Estimates by local authority
 """
 
-import io
-import os
 import re
 import sys
 import zipfile
@@ -36,12 +34,6 @@ GP_WORKFORCE_URL = (
     "general-and-personal-medical-services/31-december-2025"
 )
 
-# ODS GP practice data – provides practice postcodes.
-# This is the ODS Data Search and Export API endpoint for epraccur.
-EPRACCUR_URL = (
-    "https://www.odsdatasearchandexport.nhs.uk/api/getReport?report=epraccur"
-)
-
 # ONS mid-year population estimates – England & Wales by local authority.
 # This links to the SAPE dataset (latest available: mid-2024, published 2025).
 POPULATION_URL = (
@@ -51,45 +43,9 @@ POPULATION_URL = (
     "mid2024/ukpopulationestimates18382024.xlsx"
 )
 
-# ONS National Statistics Postcode Lookup (NSPL) – postcode to LA mapping.
-# This is the ArcGIS direct-download URL for the May 2025 NSPL ZIP (~178 MB).
-NSPL_URL = (
-    "https://www.arcgis.com/sharing/rest/content/items/"
-    "077631e063eb4e1ab43575d01381ec33/data"
-)
-
-# Column names in the epraccur data (fixed-width / CSV without headers).
-# See: https://digital.nhs.uk/services/organisation-data-service/
-#      data-search-and-export/csv-downloads/gp-and-gp-practice-related-data
-EPRACCUR_COLUMNS = [
-    "Organisation Code",
-    "Name",
-    "National Grouping",
-    "High Level Health Geography",
-    "Address Line 1",
-    "Address Line 2",
-    "Address Line 3",
-    "Address Line 4",
-    "Address Line 5",
-    "Postcode",
-    "Open Date",
-    "Close Date",
-    "Status Code",
-    "Organisation Sub-Type Code",
-    "Commissioner",
-    "Join Provider/Purchaser Date",
-    "Left Provider/Purchaser Date",
-    "Contact Telephone Number",
-    "Null 1",
-    "Null 2",
-    "Null 3",
-    "Amended Record Indicator",
-    "Null 4",
-    "Provider/Purchaser",
-    "Null 5",
-    "Prescribing Setting",
-    "Null 6",
-]
+# GP providers register – maps practice ODS codes to local authorities.
+# This file should be in the repo root (GP providers.xlsx).
+GP_PROVIDERS_PATH = Path("GP providers.xlsx")
 
 
 # ---------------------------------------------------------------------------
@@ -187,192 +143,40 @@ def load_gp_workforce(publication_url: str | None = None) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 – Practice postcodes (epraccur)
+# Step 2 – Practice-to-LA mapping from GP providers.xlsx
 # ---------------------------------------------------------------------------
 
 
-def load_practice_postcodes() -> pd.DataFrame:
-    """Download and parse the epraccur dataset to get practice postcodes."""
-    ensure_data_dir()
-    download_path = DATA_DIR / "epraccur.zip"
-    download_file(EPRACCUR_URL, download_path, "epraccur (practice postcodes)")
+def load_gp_providers() -> pd.DataFrame:
+    """Load the GP providers register to map ODS codes to local authorities."""
+    if not GP_PROVIDERS_PATH.exists():
+        print(f"\n  ERROR: {GP_PROVIDERS_PATH} not found.")
+        print("  Please place the CQC GP providers XLSX in the repo root.")
+        sys.exit(1)
 
-    print("  Reading epraccur data ...")
-    # The file may be a ZIP or a raw CSV depending on the endpoint
-    try:
-        with zipfile.ZipFile(download_path) as zf:
-            csv_names = zf.namelist()
-            csv_name = [n for n in csv_names if "epraccur" in n.lower()][0]
-            with zf.open(csv_name) as f:
-                df = pd.read_csv(
-                    f,
-                    header=None,
-                    names=EPRACCUR_COLUMNS,
-                    encoding="utf-8-sig",
-                    low_memory=False,
-                )
-    except zipfile.BadZipFile:
-        # Not a ZIP — treat as raw CSV
-        df = pd.read_csv(
-            download_path,
-            header=None,
-            names=EPRACCUR_COLUMNS,
-            encoding="utf-8-sig",
-            low_memory=False,
-        )
+    print(f"  Reading {GP_PROVIDERS_PATH} ...")
+    df = pd.read_excel(GP_PROVIDERS_PATH)
 
-    # Keep only open practices (Status Code 'A' = Active)
-    df = df[df["Status Code"].isin(["A", "a"])].copy()
+    # Keep only rows with an ODS code
+    df = df[df["Location ODS Code"].notna()].copy()
 
-    # Keep GP practices only (Prescribing Setting = 4)
-    df = df[df["Prescribing Setting"].astype(str).str.strip() == "4"].copy()
+    # Keep only non-dormant locations
+    df = df[df["Dormant (Y/N)"] != "Y"].copy()
 
-    # Clean postcodes – remove spaces for consistent matching
-    df["Postcode_Clean"] = df["Postcode"].str.strip().str.upper().str.replace(r"\s+", "", regex=True)
+    result = df[["Location ODS Code", "Location Local Authority"]].copy()
+    result.columns = ["Practice_Code", "LA_Name"]
+    result["Practice_Code"] = result["Practice_Code"].astype(str).str.strip()
+    result["LA_Name"] = result["LA_Name"].astype(str).str.strip()
 
-    print(f"  Loaded {len(df):,} active GP practices with postcodes")
-    return df[["Organisation Code", "Name", "Postcode", "Postcode_Clean"]]
+    # De-duplicate (some practices may appear more than once)
+    result = result.drop_duplicates(subset="Practice_Code")
+
+    print(f"  Loaded {len(result):,} GP practices with LA mappings")
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Step 3 – Postcode to Local Authority mapping (NSPL)
-# ---------------------------------------------------------------------------
-
-
-def load_nspl() -> pd.DataFrame:
-    """Load the ONS NSPL postcode-to-LA lookup.
-
-    Downloads the NSPL ZIP (~178 MB) automatically from the ONS Open
-    Geography Portal if not already cached locally.
-
-    Expected location: data/NSPL*.csv  (the main data CSV inside the ZIP)
-    """
-    ensure_data_dir()
-
-    # Check for pre-extracted CSV
-    nspl_csvs = list(DATA_DIR.glob("NSPL*.csv"))
-    if not nspl_csvs:
-        # Also check inside subdirectories (ZIP extraction may nest)
-        nspl_csvs = list(DATA_DIR.rglob("NSPL*.csv"))
-
-    if not nspl_csvs:
-        # Check for the ZIP file
-        nspl_zips = list(DATA_DIR.glob("NSPL*.zip"))
-        if not nspl_zips:
-            # Download automatically from ONS Open Geography Portal
-            zip_path = DATA_DIR / "NSPL.zip"
-            print("  NSPL not found locally — downloading from ONS (~178 MB) ...")
-            download_file(NSPL_URL, zip_path, "NSPL postcode lookup ZIP")
-            nspl_zips = [zip_path]
-
-        # Extract the main data CSV from the ZIP
-        zip_path = nspl_zips[0]
-        print(f"  Extracting NSPL from {zip_path.name} ...")
-        try:
-            with zipfile.ZipFile(zip_path) as zf:
-                # The main CSV is usually in Data/NSPL_*.csv
-                data_csvs = [
-                    n for n in zf.namelist()
-                    if re.search(r"Data/NSPL.*\.csv$", n, re.IGNORECASE)
-                ]
-                if not data_csvs:
-                    # Fallback: any CSV containing 'NSPL' in name
-                    data_csvs = [
-                        n for n in zf.namelist()
-                        if "nspl" in n.lower() and n.lower().endswith(".csv")
-                    ]
-                if not data_csvs:
-                    raise RuntimeError(
-                        f"Could not find NSPL data CSV inside {zip_path}. "
-                        "Please extract the main data CSV into data/ manually."
-                    )
-                csv_name = data_csvs[0]
-                print(f"  Extracting {csv_name} ...")
-                zf.extract(csv_name, DATA_DIR)
-                nspl_csvs = [DATA_DIR / csv_name]
-        except zipfile.BadZipFile:
-            # Not a ZIP — the file itself is a CSV
-            print("  File is not a ZIP — treating as CSV directly ...")
-            nspl_csvs = [zip_path]
-
-    nspl_path = nspl_csvs[0]
-    print(f"  Reading NSPL from {nspl_path} ...")
-
-    # Only read the columns we need to save memory
-    # pcd = postcode, laua = local authority district code
-    # pcds = postcode (7-char), pcd2 = postcode (8-char)
-    usecols = ["pcds", "laua"]
-    try:
-        df = pd.read_csv(nspl_path, usecols=usecols, low_memory=False)
-    except ValueError:
-        # Column names may vary; try alternatives
-        df = pd.read_csv(nspl_path, low_memory=False)
-        print(f"  NSPL columns found: {list(df.columns[:15])} ...")
-        # Try to find the right columns
-        pcd_col = next(
-            (c for c in df.columns if c.lower() in ("pcds", "pcd", "pcd2")),
-            df.columns[0],
-        )
-        la_col = next(
-            (c for c in df.columns if c.lower() in ("laua", "oslaua", "ladcd")),
-            None,
-        )
-        if la_col is None:
-            raise RuntimeError(
-                "Could not identify the local authority column in NSPL. "
-                f"Available columns: {list(df.columns)}"
-            )
-        df = df[[pcd_col, la_col]].rename(columns={pcd_col: "pcds", la_col: "laua"})
-
-    # Clean postcodes for matching – remove all spaces
-    df["Postcode_Clean"] = df["pcds"].str.strip().str.upper().str.replace(r"\s+", "", regex=True)
-    df = df[["Postcode_Clean", "laua"]].drop_duplicates(subset="Postcode_Clean")
-
-    print(f"  Loaded {len(df):,} postcode-to-LA mappings")
-    return df
-
-
-# ---------------------------------------------------------------------------
-# Step 4 – LA names lookup
-# ---------------------------------------------------------------------------
-
-
-def load_la_names() -> pd.DataFrame:
-    """Load local authority names from the NSPL Documents folder or fallback.
-
-    The NSPL ZIP typically contains a Documents/LA_UA names and codes*.csv
-    with columns like LAD25CD and LAD25NM.
-    """
-    ensure_data_dir()
-
-    # Search for LA name lookup files in the data directory
-    la_files = list(DATA_DIR.rglob("*LA_UA*names*codes*.csv"))
-    if not la_files:
-        la_files = list(DATA_DIR.rglob("*LAD*names*codes*.csv"))
-    if not la_files:
-        la_files = list(DATA_DIR.rglob("*local*authority*.csv"))
-
-    if la_files:
-        la_path = la_files[0]
-        print(f"  Reading LA names from {la_path} ...")
-        df = pd.read_csv(la_path, encoding="utf-8-sig")
-        # Find the code and name columns
-        code_col = next(
-            (c for c in df.columns if re.match(r"LAD\d+CD", c)), df.columns[0]
-        )
-        name_col = next(
-            (c for c in df.columns if re.match(r"LAD\d+NM", c)), df.columns[1]
-        )
-        return df[[code_col, name_col]].rename(
-            columns={code_col: "LA_Code", name_col: "LA_Name"}
-        )
-
-    print("  LA names file not found; will use codes only.")
-    return pd.DataFrame(columns=["LA_Code", "LA_Name"])
-
-
-# ---------------------------------------------------------------------------
-# Step 5 – Population data
+# Step 3 – Population data
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +198,7 @@ def load_population() -> pd.DataFrame:
                 "populationestimatesforukenglandandwalesscotlandandnorthernireland\n\n"
                 "  Save it as data/population_estimates.xlsx\n"
             )
-            return pd.DataFrame(columns=["LA_Code", "Population"])
+            return pd.DataFrame(columns=["LA_Name", "Population"])
 
     print("  Reading population estimates ...")
 
@@ -409,7 +213,6 @@ def load_population() -> pd.DataFrame:
                 sheet_name = name
                 break
         if sheet_name is None:
-            # Try sheets containing 'population' or 'estimates'
             for name in xls.sheet_names:
                 if any(kw in name.upper() for kw in ["POPULAT", "ESTIMAT", "MYE2"]):
                     sheet_name = name
@@ -448,7 +251,6 @@ def load_population() -> pd.DataFrame:
             None,
         )
         if total_col is None:
-            # Look for a column labelled 'All ages' or just pick the first numeric
             for c in df.columns:
                 if str(c).strip().lower() in ("all ages", "all_ages", "total"):
                     total_col = c
@@ -457,28 +259,46 @@ def load_population() -> pd.DataFrame:
         if total_col is None:
             print("  Warning: Could not identify total population column.")
             print(f"  Available columns: {list(df.columns[:20])}")
-            return pd.DataFrame(columns=["LA_Code", "Population"])
+            return pd.DataFrame(columns=["LA_Name", "Population"])
 
-        result = df[[code_col, total_col]].copy()
-        result.columns = ["LA_Code", "Population"]
-        result["LA_Code"] = result["LA_Code"].astype(str).str.strip()
+        cols_to_keep = [total_col]
+        if name_col:
+            cols_to_keep = [name_col] + cols_to_keep
+        if code_col:
+            cols_to_keep = [code_col] + cols_to_keep
+
+        result = df[cols_to_keep].copy()
+
+        if name_col and code_col:
+            result.columns = ["LA_Code", "LA_Name_ONS", "Population"]
+        elif code_col:
+            result.columns = ["LA_Code", "Population"]
+        else:
+            result.columns = ["Population"]
+
+        if "LA_Code" in result.columns:
+            result["LA_Code"] = result["LA_Code"].astype(str).str.strip()
+        if "LA_Name_ONS" in result.columns:
+            result["LA_Name_ONS"] = result["LA_Name_ONS"].astype(str).str.strip()
+
         result["Population"] = pd.to_numeric(result["Population"], errors="coerce")
         result = result.dropna(subset=["Population"])
 
         # Keep only LA-level codes (E06, E07, E08, E09, W06, S12, N09)
-        la_pattern = r"^(E0[6-9]|W06|S12|N09)"
-        result = result[result["LA_Code"].str.match(la_pattern, na=False)]
+        if "LA_Code" in result.columns:
+            la_pattern = r"^(E0[6-9]|W06|S12|N09)"
+            result = result[result["LA_Code"].str.match(la_pattern, na=False)]
 
         print(f"  Loaded population data for {len(result):,} local authorities")
         return result
 
     except Exception as exc:
         print(f"  Error reading population file: {exc}")
-        return pd.DataFrame(columns=["LA_Code", "Population"])
+        return pd.DataFrame(columns=["LA_Name", "Population"])
 
 
 # ---------------------------------------------------------------------------
-# Step 6 – Identify the GP headcount / FTE columns
+# Step 4 – Identify the GP headcount / FTE columns
 # ---------------------------------------------------------------------------
 
 
@@ -494,17 +314,10 @@ def identify_gp_columns(df: pd.DataFrame) -> dict:
             result["practice_code"] = candidate
             break
     if "practice_code" not in result:
-        # Fuzzy match
         for c in cols:
             if "PRAC" in c and "CODE" in c:
                 result["practice_code"] = c
                 break
-
-    # Postcode column (some practice-level files include this)
-    for candidate in ["POSTCODE", "POST_CODE", "PRAC_POSTCODE"]:
-        if candidate in cols:
-            result["postcode"] = candidate
-            break
 
     # Total GPs FTE
     for candidate in ["TOTAL_GP_FTE", "TOTAL_GPs_FTE", "ALL_GP_FTE", "TOTAL_FTE_GPS"]:
@@ -552,7 +365,7 @@ def main():
     print("=" * 70)
 
     # --- 1. Load GP workforce data ---
-    print("\n[1/5] Loading GP workforce practice-level data ...")
+    print("\n[1/4] Loading GP workforce practice-level data ...")
     workforce = load_gp_workforce()
     col_map = identify_gp_columns(workforce)
     print(f"  Identified columns: {col_map}")
@@ -562,63 +375,26 @@ def main():
         print(f"  Available columns: {list(workforce.columns)}")
         sys.exit(1)
 
-    # --- 2. Load practice postcodes ---
-    print("\n[2/5] Loading practice postcodes ...")
+    # --- 2. Load practice-to-LA mapping ---
+    print("\n[2/4] Loading practice-to-LA mapping (GP providers.xlsx) ...")
+    providers = load_gp_providers()
 
-    # Check if the workforce data already has postcodes
-    if "postcode" in col_map:
-        print("  Using postcodes from workforce data directly.")
-        practices = workforce[[col_map["practice_code"], col_map["postcode"]]].copy()
-        practices.columns = ["Practice_Code", "Postcode"]
-    else:
-        # Get postcodes from epraccur
-        epraccur = load_practice_postcodes()
-        practices = epraccur.rename(
-            columns={"Organisation Code": "Practice_Code"}
-        )[["Practice_Code", "Postcode", "Postcode_Clean"]]
+    # --- 3. Map practices to LAs ---
+    print("\n[3/4] Mapping practices to local authorities ...")
 
-    practices["Practice_Code"] = practices["Practice_Code"].astype(str).str.strip()
-    if "Postcode_Clean" not in practices.columns:
-        practices["Postcode_Clean"] = (
-            practices["Postcode"].str.strip().str.upper().str.replace(r"\s+", "", regex=True)
-        )
-
-    # --- 3. Load NSPL postcode-to-LA mapping ---
-    print("\n[3/5] Loading postcode-to-LA lookup (NSPL) ...")
-    nspl = load_nspl()
-
-    # --- 4. Map practices to LAs ---
-    print("\n[4/5] Mapping practices to local authorities ...")
-
-    # Merge postcodes onto workforce data
     prac_code_col = col_map["practice_code"]
     workforce["Practice_Code"] = workforce[prac_code_col].astype(str).str.strip()
 
-    # Join workforce -> practice postcodes
-    if "postcode" in col_map:
-        workforce["Postcode_Clean"] = (
-            workforce[col_map["postcode"]]
-            .str.strip()
-            .str.upper()
-            .str.replace(r"\s+", "", regex=True)
-        )
-    else:
-        workforce = workforce.merge(
-            practices[["Practice_Code", "Postcode_Clean"]],
-            on="Practice_Code",
-            how="left",
-        )
+    # Join workforce -> LA via ODS code
+    workforce = workforce.merge(providers, on="Practice_Code", how="left")
 
-    # Join workforce -> LA via postcode
-    workforce = workforce.merge(nspl, on="Postcode_Clean", how="left")
-
-    unmatched = workforce["laua"].isna().sum()
+    unmatched = workforce["LA_Name"].isna().sum()
     total = len(workforce)
     print(f"  Matched {total - unmatched:,} / {total:,} practices to a local authority")
     if unmatched > 0:
         print(f"  ({unmatched:,} practices could not be matched)")
 
-    # --- 5. Aggregate to LA level ---
+    # --- 4. Aggregate to LA level ---
     gp_fte_col = col_map.get("gp_fte")
     gp_hc_col = col_map.get("gp_hc")
 
@@ -638,26 +414,23 @@ def main():
     agg_labels["Practice_Code"] = "Num_Practices"
 
     la_summary = (
-        workforce[workforce["laua"].notna()]
-        .groupby("laua")
+        workforce[workforce["LA_Name"].notna()]
+        .groupby("LA_Name")
         .agg(agg_dict)
         .rename(columns=agg_labels)
         .reset_index()
-        .rename(columns={"laua": "LA_Code"})
     )
 
-    # --- 6. Add LA names ---
-    la_names = load_la_names()
-    if not la_names.empty:
-        la_summary = la_summary.merge(la_names, on="LA_Code", how="left")
-    else:
-        la_summary["LA_Name"] = ""
-
-    # --- 7. Add population data ---
-    print("\n[5/5] Adding population data ...")
+    # --- 5. Add population data ---
+    print("\n[4/4] Adding population data ...")
     population = load_population()
-    if not population.empty:
-        la_summary = la_summary.merge(population, on="LA_Code", how="left")
+
+    if not population.empty and "LA_Name_ONS" in population.columns:
+        # Match on LA name (GP providers uses names, ONS uses names + codes)
+        la_summary = la_summary.merge(
+            population, left_on="LA_Name", right_on="LA_Name_ONS", how="left"
+        )
+        la_summary = la_summary.drop(columns=["LA_Name_ONS"], errors="ignore")
 
         # Calculate GPs per 100,000 population
         if "GP_FTE" in la_summary.columns:
@@ -668,14 +441,18 @@ def main():
             la_summary["GP_HC_per_100k"] = (
                 la_summary["GP_Headcount"] / la_summary["Population"] * 100_000
             ).round(1)
+    elif not population.empty:
+        print("  Warning: Could not match population data (no name column found).")
 
-    # --- 8. Sort and output ---
+    # --- 6. Sort and output ---
     sort_col = "GP_FTE" if "GP_FTE" in la_summary.columns else "GP_Headcount"
     if sort_col in la_summary.columns:
         la_summary = la_summary.sort_values(sort_col, ascending=False)
 
     # Reorder columns for readability
-    col_order = ["LA_Code", "LA_Name"]
+    col_order = ["LA_Name"]
+    if "LA_Code" in la_summary.columns:
+        col_order.append("LA_Code")
     for c in ["Num_Practices", "GP_Headcount", "GP_FTE", "Population",
               "GP_HC_per_100k", "GP_FTE_per_100k"]:
         if c in la_summary.columns:
@@ -683,6 +460,7 @@ def main():
     la_summary = la_summary[[c for c in col_order if c in la_summary.columns]]
 
     # Save output
+    ensure_data_dir()
     output_path = DATA_DIR / "gp_workforce_by_local_authority.csv"
     la_summary.to_csv(output_path, index=False)
     print(f"\n{'=' * 70}")
@@ -696,19 +474,25 @@ def main():
     print(la_summary[numeric_cols].describe().round(1).to_string())
 
     # Print top 10 and bottom 10
-    if "GP_FTE" in la_summary.columns:
-        print("\nTop 10 LAs by GP FTE:")
+    if sort_col in la_summary.columns:
+        print(f"\nTop 10 LAs by {sort_col}:")
+        display_cols = ["LA_Name"]
+        if "LA_Code" in la_summary.columns:
+            display_cols.append("LA_Code")
+        display_cols.append(sort_col)
+        if f"{sort_col}_per_100k" in la_summary.columns:
+            display_cols.append(f"{sort_col}_per_100k")
+        elif "GP_FTE_per_100k" in la_summary.columns:
+            display_cols.append("GP_FTE_per_100k")
         print(
             la_summary.head(10)[
-                [c for c in ["LA_Name", "LA_Code", "GP_FTE", "GP_FTE_per_100k"]
-                 if c in la_summary.columns]
+                [c for c in display_cols if c in la_summary.columns]
             ].to_string(index=False)
         )
-        print("\nBottom 10 LAs by GP FTE:")
+        print(f"\nBottom 10 LAs by {sort_col}:")
         print(
             la_summary.tail(10)[
-                [c for c in ["LA_Name", "LA_Code", "GP_FTE", "GP_FTE_per_100k"]
-                 if c in la_summary.columns]
+                [c for c in display_cols if c in la_summary.columns]
             ].to_string(index=False)
         )
 
