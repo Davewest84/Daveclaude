@@ -35,13 +35,19 @@ GP_WORKFORCE_URL = (
 )
 
 # ONS mid-year population estimates – England & Wales by local authority.
-# This links to the SAPE dataset (latest available: mid-2024, published 2025).
-POPULATION_URL = (
+# Multiple URLs to try, as ONS filenames change between releases.
+POPULATION_URLS = [
+    # England & Wales dataset (mid-2024)
+    "https://www.ons.gov.uk/file?uri=/peoplepopulationandcommunity/"
+    "populationandmigration/populationestimates/datasets/"
+    "estimatesofthepopulationforenglandandwales/"
+    "mid2024/estimatesofthepopulationforenglandandwalesmid2024.xlsx",
+    # UK-wide dataset (mid-2024)
     "https://www.ons.gov.uk/file?uri=/peoplepopulationandcommunity/"
     "populationandmigration/populationestimates/datasets/"
     "populationestimatesforukenglandandwalesscotlandandnorthernireland/"
-    "mid2024/ukpopulationestimates18382024.xlsx"
-)
+    "mid2024/ukpopulationestimates18382024.xlsx",
+]
 
 # GP providers register – maps practice ODS codes to local authorities.
 # This file should be in the repo root (GP providers.xlsx).
@@ -185,17 +191,24 @@ def load_population() -> pd.DataFrame:
     ensure_data_dir()
     xlsx_path = DATA_DIR / "population_estimates.xlsx"
 
-    # Try downloading; this URL may change so allow for manual placement
+    # Try downloading from multiple URLs; ONS filenames change between releases
     if not xlsx_path.exists():
-        try:
-            download_file(POPULATION_URL, xlsx_path, "ONS population estimates")
-        except Exception as exc:
+        downloaded = False
+        for url in POPULATION_URLS:
+            try:
+                download_file(url, xlsx_path, "ONS population estimates")
+                downloaded = True
+                break
+            except Exception:
+                print(f"  URL not found, trying next ...")
+                continue
+        if not downloaded:
             print(
-                f"\n  *** Could not download population data: {exc} ***\n"
+                "\n  *** Could not download population data ***\n"
                 "  Please download the mid-year population estimates XLSX from:\n"
                 "  https://www.ons.gov.uk/peoplepopulationandcommunity/"
                 "populationandmigration/populationestimates/datasets/"
-                "populationestimatesforukenglandandwalesscotlandandnorthernireland\n\n"
+                "estimatesofthepopulationforenglandandwales\n\n"
                 "  Save it as data/population_estimates.xlsx\n"
             )
             return pd.DataFrame(columns=["LA_Name", "Population"])
